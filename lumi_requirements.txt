@@ -1,0 +1,12 @@
+ftfy
+huggingface_hub
+jinja2==3.1.3
+numpy
+pybind11
+regex
+sentencepiece
+six
+tiktoken
+tokenizers
+datasets
+transformers
