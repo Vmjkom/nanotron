@@ -90,8 +90,9 @@ dataset = PretrainDatasetsArgs(
     hf_dataset_or_datasets="HuggingFaceH4/testing_alpaca_small", text_column_name="completion"
 )
 
-checkpoints_path = os.path.dirname(os.path.dirname(__file__)) + "/checkpoints"
-# os.makedirs(checkpoints_path, exist_ok=True)
+checkpoints_path = "checkpoints"
+# checkpoints_path = os.path.dirname(os.path.dirname(__file__)) + "/checkpoints"
+os.makedirs(checkpoints_path, exist_ok=True)
 
 config = Config(
     general=GeneralArgs(project="debug", run="tiny_llama_%date_%jobid", seed=seed),
