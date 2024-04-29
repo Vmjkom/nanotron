@@ -10,6 +10,7 @@ mkdir -p "$PYTHONUSERBASE"
 
 CMD="
 python3 -m pip install -r $SCRIPT_DIR/lumi_requirements.txt --user
+python3 -m pip install . --user
 echo 'Installation finished'
 "
 
