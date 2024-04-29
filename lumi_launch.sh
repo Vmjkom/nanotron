@@ -16,6 +16,4 @@ echo "Run on $SLURMD_NODENAME ($SLURM_PROCID/$WORLD_SIZE)," \
 
 CMD="python3 $@"
 
-echo "CMD $CMD"
-
 singularity_exec "$CMD"
