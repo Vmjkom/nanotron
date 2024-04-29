@@ -9,7 +9,7 @@ rm -rf "$PYTHONUSERBASE"
 mkdir -p "$PYTHONUSERBASE"
 
 CMD="
-python3 -m pip install pyyaml packaging safetensors dacite tqdm --user
+python3 -m pip install -r $SCRIPT_DIR/lumi_requirements.txt --user
 echo 'Installation finished'
 "
 
