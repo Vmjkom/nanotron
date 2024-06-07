@@ -9,7 +9,7 @@ export CONTAINER="/appl/local/containers/sif-images/lumi-pytorch-rocm-5.6.1-pyth
 
 REAL_PWD="$(realpath "$PWD")"
 export SINGULARITY_BIND="$REAL_PWD"
-
+export SINGULARITY_BIND=$SINGULARITY_BIND,"/pfs,/scratch,/projappl,/project,/flash,/appl"
 singularity_exec() {
     cmd="$1"
     real_pwd="$(realpath "$PWD")"

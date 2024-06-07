@@ -163,3 +163,8 @@ cython_debug/
 
 checkpoints/
 wandb/
+logs/*.err
+logs/*.out
+hostfiles/*
+pythonuserbase
+core
