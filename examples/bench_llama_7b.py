@@ -20,6 +20,7 @@ from nanotron.config import (
     TokenizerArgs,
     TokensArgs,
 )
+from nanotron.config.config import AdamWOptimizerArgs, DatasetStageArgs
 from nanotron.logging import human_format
 
 # Config for a llama model with 6.74M parameters
@@ -47,10 +48,12 @@ optimizer = OptimizerArgs(
     weight_decay=0.01,
     clip_grad=1.0,
     accumulate_grad_in_fp32=True,
-    adam_eps=1e-08,
-    adam_beta1=0.9,
-    adam_beta2=0.95,
-    torch_adam_is_fused=True,
+    optimizer_factory=AdamWOptimizerArgs(
+        adam_eps=1e-08,
+        adam_beta1=0.9,
+        adam_beta2=0.95,
+        torch_adam_is_fused=True,
+    ),
     learning_rate_scheduler=learning_rate,
 )
 
@@ -79,7 +82,12 @@ config = Config(
     optimizer=optimizer,
     logging=LoggingArgs(),
     tokens=tokens,
-    data=DataArgs(dataset=dataset, seed=seed),
+    data_stages=[
+        DatasetStageArgs(
+            name="Stable Training Stage", start_training_step=1, data=DataArgs(dataset=dataset, seed=seed)
+        ),
+        DatasetStageArgs(name="Annealing Phase", start_training_step=10, data=DataArgs(dataset=dataset, seed=seed)),
+    ],
     profiler=None,
 )
 
@@ -90,6 +98,6 @@ if __name__ == "__main__":
     config.save_as_yaml(f"{dir}/config_llama.yaml")
 
     # Launch training
-    os.system("export CUDA_DEVICE_MAX_CONNECTIONS=1")
-    gpus = config.parallelism.dp * config.parallelism.pp * config.parallelism.tp
-    os.system(f"torchrun --nproc_per_node={gpus} run_train.py --config-file {dir}/config_llama.yaml")
+    #os.system("export CUDA_DEVICE_MAX_CONNECTIONS=1")
+    #gpus = config.parallelism.dp * config.parallelism.pp * config.parallelism.tp
+    #os.system(f"torchrun --nproc_per_node={gpus} run_train.py --config-file {dir}/config_llama.yaml")
