@@ -1,41 +1,56 @@
 #!/bin/bash
-#SBATCH --nodes=1
+#SBATCH -J debug_nanotron_LLAMA2_7B_8N
+#SBATCH --cpus-per-task=7
+#SBATCH --nodes=8
 #SBATCH --ntasks-per-node=8
 #SBATCH --mem=480G
 #SBATCH --partition=dev-g
-#SBATCH --time=0-00:15:00
+#SBATCH --time=01:00:00
 #SBATCH --gpus-per-node=mi250:8
 #SBATCH --exclusive
 #SBATCH --account=project_462000558
-#SBATCH --output=logs/%j.out
-#SBATCH --error=logs/%j.err
+#SBATCH --output=logs/%x-%j.out
+#SBATCH --error=logs/%x-%j.err
 
-set -xo pipefail
+set -eox pipefail
 
 # symlink logs/latest.out and logs/latest.err
-ln -f -s $SLURM_JOB_ID.out logs/latest.out
-ln -f -s $SLURM_JOB_ID.err logs/latest.err
-
+ln -f -s $SLURM_JOB_NAME-$SLURM_JOB_ID.out logs/latest.out
+ln -f -s $SLURM_JOB_NAME-$SLURM_JOB_ID.err logs/latest.err
 
 export MASTER_ADDR=$(scontrol show hostnames "$SLURM_JOB_NODELIST" | head -n 1)
 export MASTER_PORT=9999
-export TOKENIZERS_PARALLELISM=false #Disable forking the FastTokenizer
 #export NANOTRON_BENCHMARK=1 #Logs throughput
-export HF_HOME=/scratch/project_462000558/transformers_cache
-export PYTHONWARNINGS=ignore #Decrease verbosity in logging. Pytorch warnings log on every rank
 export HF_TOKEN="TOKEN HERE FROM HF"
-CONFIG="examples/config_llama.yaml"
+export CONFIG="examples/config_llama.yaml"
 
-# create hostfile
-rm hostfiles/*
-HOSTFILE="hostfiles/$SLURM_JOB_ID.txt"
-mkdir -p $(dirname "$HOSTFILE")
-scontrol show hostnames "$SLURM_JOB_NODELIST" | while read n; do
-    echo "$n slots=$SLURM_GPUS_ON_NODE" >> "$HOSTFILE"
-done
+#Prepend variables that you want singularity to export at runtime
+#SINGULARITYENV_ is needed to override variables of the same name inside the container
+#More info https://docs.sylabs.io/guides/3.7/user-guide/environment_and_metadata.html#environment-overview
+export SINGULARITYENV_TOKENIZERS_PARALLELISM=false #Disable forking the FastTokenizer
+export SINGULARITYENV_TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+export SINGULARITYENV_HF_HOME=/scratch/project_462000558/transformers_cache
+export SINGULARITYENV_PYTHONWARNINGS=ignore #Decrease verbosity in logging. Pytorch warnings log on every rank
+export SINGULARITYENV_PYTHONUSERBASE="pythonuserbase" 
+export SINGULARITYENV_PYTHONPATH="$PYTHONPATH:src"
+export SINGULARITYENV_TRANSFORMERS_VERBOSITY=error
+export SINGULARITYENV_TRANSFORMERS_NO_ADVISORY_WARNINGS=1
+
+
+#SINGULARITY
+export CONTAINER="/appl/local/containers/sif-images/lumi-pytorch-rocm-5.6.1-python-3.10-pytorch-v2.2.0.sif"
+export SINGULARITY_BIND="/pfs,/scratch,/projappl,/project,/flash,/appl,/var/spool/slurmd,/opt/cray/,/usr/lib64/libcxi.so.1,/usr/lib64/libjansson.so.4"
+
+#Masks for binding cpu cores to right numa nodes and therefor to right gpu's
+c=fe
+MYMASKS="0x${c}000000000000,0x${c}00000000000000,0x${c}0000,0x${c}000000,0x${c},0x${c}00,0x${c}00000000,0x${c}0000000000"
 
 echo "START: $(date)"
-
-srun --label lumi_launch.sh run_train.py --config-file "$CONFIG"
+PWD=$(realpath "$PWD")
+srun --cpu-bind=mask_cpu:$MYMASKS --label singularity exec \
+    -B $PWD:$PWD \
+    $CONTAINER \
+    $PWD/lumi_launch.sh \
+    $PWD/run_train.py --config-file "$CONFIG"
 
 echo "END: $(date)"
