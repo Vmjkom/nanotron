@@ -15,14 +15,14 @@ echo "Run on $SLURMD_NODENAME ($SLURM_PROCID/$WORLD_SIZE)," \
      "master $MASTER_ADDR port $MASTER_PORT," \
      "GPUs $SLURM_GPUS_ON_NODE"
 
-CMD="python3 -u -m torch.distributed.run \
-    --nproc_per_node $SLURM_GPUS_ON_NODE \
-    --nnodes $SLURM_NNODES \
-    --node_rank \$SLURM_PROCID \
-    --rdzv_id $SLURM_JOB_ID \
-    --rdzv_endpoint $MASTER_ADDR:$MASTER_PORT \
-    --rdzv_backend c10d \
-    --max_restarts 0 \
-    --tee 3"
+#CMD="python3 -u -m torch.distributed.run \
+#    --nproc_per_node $SLURM_GPUS_ON_NODE \
+#    --nnodes $SLURM_NNODES \
+#    --node_rank \$SLURM_PROCID \
+#    --rdzv_id $SLURM_JOB_ID \
+#    --rdzv_endpoint $MASTER_ADDR:$MASTER_PORT \
+#    --rdzv_backend c10d \
+#    --max_restarts 0 \
+#    --tee 3"
 
 python3 "$@"

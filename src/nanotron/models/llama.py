@@ -262,7 +262,7 @@ class CausalSelfAttention(nn.Module, AttachableStore):
         tp_pg: dist.ProcessGroup,
         layer_idx: int,
     ):
-        # from flash_attn.layers.rotary import RotaryEmbedding as FlashRotaryEmbedding
+        #from flash_attn.layers.rotary import RotaryEmbedding as FlashRotaryEmbedding
 
         super().__init__()
         # Tensor parallel considerations: We split tensors along head dimension
@@ -324,7 +324,7 @@ class CausalSelfAttention(nn.Module, AttachableStore):
         )
 
         # NOTE: Only supported for training (TODO(fmom): position_ids not supported yet)
-        self.flash_rotary_embedding = FlashRotaryEmbedding(dim=self.d_qk, base=config.rope_theta, interleaved=True)
+        #self.flash_rotary_embedding = FlashRotaryEmbedding(dim=self.d_qk, base=config.rope_theta, interleaved=True)
 
         self.o_proj = TensorParallelRowLinear(
             config.num_attention_heads * self.d_qk,
