@@ -1,41 +1,40 @@
 checkpoints:
-  checkpoint_interval: 1000
-  checkpoints_path: checkpoints/
+  checkpoint_interval: 10
+  checkpoints_path: checkpoints
   checkpoints_path_is_shared_file_system: false
-  resume_checkpoint_path: null
+  resume_checkpoint_path: s3://phuc-experiments/temp/config_tiny_llama_with_s3_upload
   save_initial_state: false
 data_stages:
 - data:
     dataset:
-      dataset_folder: datasets/c4-es/tokenized
+      dataset_overwrite_cache: false
+      dataset_processing_num_proc_per_process: 1
+      hf_dataset_config_name: null
+      hf_dataset_or_datasets: stas/openwebtext-10k
+      hf_dataset_splits: train
+      text_column_name: text
     num_loading_workers: 1
     seed: 42
-  name: General purpose training (Single dataset)
+  name: Stable Training Stage
   start_training_step: 1
 - data:
     dataset:
-      dataset_folder:
-      - datasets/SlimPajama-6B/tokenized
-      - datasets/c4-es/tokenized
+      dataset_overwrite_cache: false
+      dataset_processing_num_proc_per_process: 1
+      hf_dataset_config_name: null
+      hf_dataset_or_datasets: stas/openwebtext-10k
+      hf_dataset_splits: train
+      text_column_name: text
     num_loading_workers: 1
     seed: 42
-  name: Second purpose training (> 1 dataset)
-  start_training_step: 15
-- data:
-    dataset:
-      dataset_folder:
-        datasets/SlimPajama-6B/tokenized: 0.8
-        datasets/c4-es/tokenized: 0.2
-    num_loading_workers: 1
-    seed: 42
-  name: Third purpose training (Blended dataset)
-  start_training_step: 25
+  name: Annealing Phase
+  start_training_step: 10
 general:
   benchmark_csv_path: null
   consumed_train_samples: null
   ignore_sanity_checks: true
-  project: Nanoset
-  run: llama
+  project: debug
+  run: tiny_llama_%date_%jobid
   seed: 42
   step: null
 lighteval: null
@@ -57,7 +56,7 @@ model:
     initializer_range: 0.02
     intermediate_size: 64
     is_llama_config: true
-    max_position_embeddings: 1024
+    max_position_embeddings: 256
     num_attention_heads: 4
     num_hidden_layers: 2
     num_key_value_heads: 4
@@ -67,14 +66,14 @@ model:
     rope_scaling: null
     tie_word_embeddings: true
     use_cache: true
-    vocab_size: 50257
+    vocab_size: 256
 optimizer:
   accumulate_grad_in_fp32: true
   clip_grad: 1.0
   learning_rate_scheduler:
     learning_rate: 0.0003
     lr_decay_starting_step: null
-    lr_decay_steps: 98
+    lr_decay_steps: 13
     lr_decay_style: cosine
     lr_warmup_steps: 2
     lr_warmup_style: linear
@@ -98,13 +97,19 @@ parallelism:
 profiler: null
 tokenizer:
   tokenizer_max_length: null
-  tokenizer_name_or_path: gpt2
+  tokenizer_name_or_path: robot-test/dummy-tokenizer-wordlevel
   tokenizer_revision: null
 tokens:
   batch_accumulation_per_replica: 1
   limit_test_batches: 0
   limit_val_batches: 0
   micro_batch_size: 2
-  sequence_length: 1024
-  train_steps: 200
+  sequence_length: 256
+  train_steps: 30
   val_check_interval: -1
+s3_upload:
+  remove_after_upload: true
+  s5cmd_concurrency: 5
+  s5cmd_numworkers: 16
+  s5cmd_path: /fsx/nouamane/miniconda/envs/2-1-cu121/bin/s5cmd
+  upload_s3_path: s3://phuc-experiments/temp/config_tiny_llama_with_s3_upload

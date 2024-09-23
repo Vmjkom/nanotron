@@ -14,10 +14,11 @@
 # limitations under the License.
 """PyTorch LLaMa model."""
 
-from typing import Dict, Optional, Union, List
+from typing import Dict, List, Optional, Union
 
 import torch
 from torch import nn
+from torch.utils.checkpoint import CheckpointFunction
 
 from nanotron import distributed as dist
 from nanotron import logging
@@ -73,9 +74,10 @@ class RotaryEmbedding(nn.Module):
             self.freqs_cis = self.freqs_cis.to(torch.float)
         assert self.freqs_cis.dtype == torch.float
         freqs = 1.0 / (
-            self.theta
-            ** (torch.arange(0, self.dim, 2, dtype=torch.float, device="cuda")[: (self.dim // 2)] / self.dim)
-        )
+            self.theta ** (torch.arange(0, self.dim, 2, dtype=torch.float, device="cpu")[: (self.dim // 2)] / self.dim)
+        ).to(
+            "cuda"
+        )  # should be computed on CPU, otherwise different results with Transformers.
         t = torch.arange(self.end, device="cuda")
         freqs = torch.outer(t, freqs).float()
         complex_freqs = torch.polar(torch.ones_like(freqs), freqs)
@@ -117,6 +119,78 @@ class RotaryEmbedding(nn.Module):
         return x_out.type(dtype)
 
 
+## Copy from transformers. Non interleaved version of RoPE. Will be refactored later
+class LlamaRotaryEmbedding(nn.Module):
+    def __init__(self, dim: int, end: int, theta: float = 500000.0):
+        super().__init__()
+        self.dim = dim
+        self.end = end
+        self.theta = theta
+        self.init_rotary_embeddings()
+
+    def init_rotary_embeddings(self):
+        inv_freq = 1.0 / (
+            self.theta ** (torch.arange(0, self.dim, 2, dtype=torch.float, device="cpu") / self.dim)
+        )  # important to compute on CPU
+        self.register_buffer(
+            "inv_freq", torch.empty(self.dim // 2, dtype=torch.float, device="cuda"), persistent=False
+        )
+        self.inv_freq = self.inv_freq.to(
+            torch.float
+        )  # make it float32 before copy to avoid precision loss during copy_
+        self.inv_freq.copy_(inv_freq)
+
+    @torch.no_grad()
+    def forward(
+        self,
+        x: torch.Tensor,  # [batch_size, seq_length, num_heads, d_qk]
+        position_ids: Optional[torch.LongTensor],  # [batch_size, seq_length]
+    ):
+        # x: [bs, num_attention_heads, seq_len, head_size]
+        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1)
+        position_ids_expanded = position_ids[:, None, :].float()
+        # Force float32 since bfloat16 loses precision on long contexts
+        # See https://github.com/huggingface/transformers/pull/29285
+        device_type = x.device.type
+        device_type = device_type if isinstance(device_type, str) and device_type != "mps" else "cpu"
+        with torch.autocast(device_type=device_type, enabled=False):
+            freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
+            emb = torch.cat((freqs, freqs), dim=-1)
+            cos = emb.cos()
+            sin = emb.sin()
+        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
+
+    def rotate_half(self, x):
+        """Rotates half the hidden dims of the input."""
+        x1 = x[..., : x.shape[-1] // 2]
+        x2 = x[..., x.shape[-1] // 2 :]
+        return torch.cat((-x2, x1), dim=-1)
+
+    def apply_rotary_pos_emb(self, q, k, cos, sin, unsqueeze_dim=2):
+        """Applies Rotary Position Embedding to the query and key tensors.
+
+        Args:
+            q (`torch.Tensor`): The query tensor.
+            k (`torch.Tensor`): The key tensor.
+            cos (`torch.Tensor`): The cosine part of the rotary embedding.
+            sin (`torch.Tensor`): The sine part of the rotary embedding.
+            unsqueeze_dim (`int`, *optional*, defaults to 1):
+                The 'unsqueeze_dim' argument specifies the dimension along which to unsqueeze cos[position_ids] and
+                sin[position_ids] so that they can be properly broadcasted to the dimensions of q and k. For example, note
+                that cos[position_ids] and sin[position_ids] have the shape [batch_size, seq_len, head_dim]. Then, if q and
+                k have the shape [batch_size, heads, seq_len, head_dim], then setting unsqueeze_dim=1 makes
+                cos[position_ids] and sin[position_ids] broadcastable to the shapes of q and k. Similarly, if q and k have
+                the shape [batch_size, seq_len, heads, head_dim], then set unsqueeze_dim=2.
+        Returns:
+            `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
+        """
+        cos = cos.unsqueeze(unsqueeze_dim)
+        sin = sin.unsqueeze(unsqueeze_dim)
+        q_embed = (q * cos) + (self.rotate_half(q) * sin)
+        k_embed = (k * cos) + (self.rotate_half(k) * sin)
+        return q_embed, k_embed
+
+
 class GLUActivation(nn.Module):
     def __init__(self, act_fn_name: str):
         super().__init__()
@@ -154,6 +228,7 @@ class MLP(nn.Module):
             bias=False,
             async_communication=tp_linear_async_communication,
             contiguous_chunks=gate_up_contiguous_chunks,
+            tp_recompute_allgather=parallel_config.tp_recompute_allgather,
         )
         self.down_proj = TensorParallelRowLinear(
             config.intermediate_size,
@@ -163,7 +238,6 @@ class MLP(nn.Module):
             bias=False,
             async_communication=tp_linear_async_communication and tp_mode is TensorParallelLinearMode.REDUCE_SCATTER,
         )
-        # TODO @nouamane: why can't we torch.jit.script GLUActivation?
         self.split_silu_mul = GLUActivation(config.hidden_act)
 
     def forward(self, hidden_states):  # [seq_length, batch_size, hidden_dim]
@@ -315,16 +389,27 @@ class CausalSelfAttention(nn.Module, AttachableStore):
             bias=False,
             async_communication=tp_linear_async_communication,
             contiguous_chunks=qkv_contiguous_chunks,
+            tp_recompute_allgather=parallel_config.tp_recompute_allgather,
         )
         # TODO(kunhao): We want to have only one version per device and not one version per layer.
-        self.rotary_embedding = RotaryEmbedding(
-            dim=self.d_qk,
-            end=config.max_position_embeddings,
-            theta=config.rope_theta,
-        )
+        if config.rope_interleaved:
+            self.rotary_embedding = RotaryEmbedding(
+                dim=self.d_qk,
+                end=config.max_position_embeddings,
+                theta=config.rope_theta,
+            )
+        else:
+            self.rotary_embedding = LlamaRotaryEmbedding(
+                dim=self.d_qk,
+                end=config.max_position_embeddings,
+                theta=config.rope_theta,
+            )
+        self.rope_interleaved = config.rope_interleaved
 
         # NOTE: Only supported for training (TODO(fmom): position_ids not supported yet)
-        #self.flash_rotary_embedding = FlashRotaryEmbedding(dim=self.d_qk, base=config.rope_theta, interleaved=True)
+        self.flash_rotary_embedding = FlashRotaryEmbedding(
+            dim=self.d_qk, base=config.rope_theta, interleaved=config.rope_interleaved
+        )
 
         self.o_proj = TensorParallelRowLinear(
             config.num_attention_heads * self.d_qk,
@@ -389,24 +474,190 @@ class CausalSelfAttention(nn.Module, AttachableStore):
             )  # [3, batch_size, seq_length, n_local_q_heads, d_qk]
 
         store = self.get_local_store()
-        if store is not None:  # Inference
-            raise ValueError("Only support training, doesn't support inference yet ...")
+        if store is not None:  # Inference case
+            # Double check that we use store only at inference time
+            assert key_states.requires_grad is False
+            assert value_states.requires_grad is False
+            if "position_offsets" in store:
+                old_position_offsets = store["position_offsets"]
+                position_ids = old_position_offsets[:, None] + sequence_mask
+            else:
+                position_ids = torch.cumsum(sequence_mask, dim=-1, dtype=torch.int32) - 1
+            position_offsets = position_ids[:, -1]
 
-        else:  # Training
-            # # Apply rotary embeddings to query/key states
-            # # NOTE: The layout is different from models/llama.py which is [batch_size, num_heads, seq_length, d_qk]
-            # # Here it is, [batch_size, seq_length, num_heads, d_qk]
-            # # [2, batch_size, seq_length, num_heads, d_qk]
-            # key_value_states = torch.cat([key_states.unsqueeze(0), value_states.unsqueeze(0)], dim=0)
-            # # [batch_size, seq_length, 2, num_heads, d_qk]
-            # key_value_states = key_value_states.permute(1, 2, 0, 3, 4).contiguous()
-            # query_states, key_value_states = self.flash_rotary_embedding(query_states, kv=key_value_states)
-            # # [batch_size, seq_length, num_heads, d_qk]
-            # key_states, value_states = torch.split(key_value_states, 1, dim=2)
+            # Compute rotary embeddings
+            # Note: keep track of old rotary embedding end to check if we need to enlarge k_cache and v_cache
+            old_rotary_embed_end = self.rotary_embedding.end
+            # interleaved version.
+            if self.rope_interleaved:
+                query_states = self.rotary_embedding(query_states, position_ids=position_ids)
+                key_states = self.rotary_embedding(key_states, position_ids=position_ids)
+            # non interleaved version.
+            else:
+                cos, sin = self.rotary_embedding(value_states, position_ids)
+                query_states, key_states = self.rotary_embedding.apply_rotary_pos_emb(
+                    query_states, key_states, cos, sin
+                )
 
-            position_ids = torch.cumsum(sequence_mask, dim=-1, dtype=torch.int32) - 1
-            query_states = self.rotary_embedding(query_states, position_ids=position_ids)
-            key_states = self.rotary_embedding(key_states, position_ids=position_ids)
+            if "key" not in store:
+                # First inference iteration (Prefill)
+                # TODO @nouamane: support custom masking
+                # assert that [ False, False, False, False,  True,  True,  True,  True,  True,  True] is accepted
+                # but [ False, False, False, False,  True,  True,  False,  False,  True,  True] is not (can't mask in the middle of sequence)
+                assert ~(
+                    sequence_mask[:, :-1] & (~sequence_mask[:, 1:])  # True is never followed by False
+                ).any(), "Can't mask in the middle of sequence, please make sure that pads are at the left of the sequence if existing"
+
+                # preallocate k_cache, v_cache to self.prefill_kv_len
+                k_cache = torch.zeros(
+                    (
+                        batch_size,
+                        self.prefill_kv_len,
+                        self.n_local_kv_heads,
+                        self.d_qk,
+                    ),
+                    dtype=query_states.dtype,
+                    device=query_states.device,
+                )
+                v_cache = torch.zeros(
+                    (batch_size, self.prefill_kv_len, self.n_local_kv_heads, self.d_v),
+                    dtype=query_states.dtype,
+                    device=query_states.device,
+                )
+                # Remove pad tokens from key_states and concatenate samples in key_unpad
+                # cu_seqlens_k is the cumulative sequence lengths of key_states
+                (query_unpad, indices_q, cu_seqlens_q, max_seqlen_q) = bert_padding.unpad_input(
+                    query_states,
+                    sequence_mask,
+                )
+                (key_unpad, indices_k, cu_seqlens_k, max_seqlen_k) = bert_padding.unpad_input(
+                    key_states, sequence_mask
+                )
+                (value_unpad, _, _, _) = bert_padding.unpad_input(value_states, sequence_mask)
+
+                # NOTE: this scale is for µTransfer,
+                # in SP, we use sqrt(1/d_h)
+                softmax_scale = 1 / query_states.shape[-1] if self.is_using_mup else None
+                output_unpad = flash_attn_varlen_func(
+                    q=query_unpad,  # (total_q, n_local_q_heads, d_qk)
+                    k=key_unpad,  # (total_kv, n_local_kv_heads, d_qk)
+                    v=value_unpad,  # (total_kv, n_local_kv_heads, d_v)
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_k=cu_seqlens_k,
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_k=max_seqlen_k,
+                    dropout_p=0.0,
+                    softmax_scale=softmax_scale,
+                    causal=True,  # True in prefill phase, False in subsequent phases
+                    return_attn_probs=False,
+                )  # (total_unpadded, n_local_q_heads, d_v)
+
+                attention_output = bert_padding.pad_input(
+                    output_unpad, indices_q, batch_size, q_length
+                )  # (batch_size, q_length, n_local_q_heads, d_v)
+
+                pad_to_right(key_states, sequence_mask, new_tensor=k_cache)
+                pad_to_right(value_states, sequence_mask, new_tensor=v_cache)
+
+            else:
+                # Pull pre-computed key/value states
+                # Subsequent inference iterations (q_length=1)
+                k_cache = store["key"]
+                v_cache = store["value"]
+
+                # NOTE(fmom): According to flash_attn_with_kvcache, "If you pass in k / v, you must make sure that the cache is large enough to hold the new values"
+                # Since rotary embedding has changed (to enable larger context), we need to enlarge k_cache and v_cache
+                if self.rotary_embedding.end > old_rotary_embed_end:
+                    k_cache = torch.cat(
+                        [
+                            k_cache,
+                            torch.zeros(
+                                (
+                                    batch_size,
+                                    self.rotary_embedding.end - old_rotary_embed_end,
+                                    self.n_local_kv_heads,
+                                    self.d_qk,
+                                ),
+                                dtype=query_states.dtype,
+                                device=query_states.device,
+                            ),
+                        ],
+                        dim=1,
+                    )
+
+                    v_cache = torch.cat(
+                        [
+                            v_cache,
+                            torch.zeros(
+                                (
+                                    batch_size,
+                                    self.rotary_embedding.end - old_rotary_embed_end,
+                                    self.n_local_kv_heads,
+                                    self.d_v,
+                                ),
+                                dtype=query_states.dtype,
+                                device=query_states.device,
+                            ),
+                        ],
+                        dim=1,
+                    )
+
+                assert (
+                    k_cache.shape[1] == self.rotary_embedding.end
+                ), f"Cache size {k_cache.shape[1]} is smaller than rotary embedding end {self.rotary_embedding.end}"
+                assert (
+                    v_cache.shape[1] == self.rotary_embedding.end
+                ), f"Cache size {v_cache.shape[1]} is smaller than rotary embedding end {self.rotary_embedding.end}"
+
+                # [batch_size, seq_length, num_heads, d_qk]
+                query_states = query_states.view(
+                    batch_size, q_length, self.n_local_q_heads, self.d_qk
+                )  # [batch_size, q_length, self.n_heads, d_qk]
+                kv_length = key_states.shape[1]
+                key_states = key_states.view(
+                    batch_size, kv_length, self.n_local_kv_heads, self.d_qk
+                )  # [batch_size, kv_length, self.n_heads, d_qk]
+                value_states = value_states.view(
+                    batch_size, kv_length, self.n_local_kv_heads, self.d_v
+                )  # [batch_size, kv_length, self.n_heads, d_v]
+
+                # NOTE: this scale is for µTransfer,
+                # in SP, we use sqrt(1/d_h)
+                softmax_scale = 1 / query_states.shape[-1] if self.is_using_mup else None
+                attention_output = flash_attn_with_kvcache(
+                    query_states,
+                    k_cache,
+                    v_cache,
+                    key_states,
+                    value_states,
+                    rotary_cos=None,
+                    rotary_sin=None,
+                    # TODO @nouamane: seems like this doesn't help to indicate padding in (for first iteration it's just 0)
+                    cache_seqlens=position_offsets.contiguous(),
+                    softmax_scale=softmax_scale,
+                    causal=True,
+                    rotary_interleaved=False,  # the value is not used unless rotary_cos/sin is provided. https://github.com/Dao-AILab/flash-attention
+                )
+
+            store.update(
+                {
+                    "key": k_cache,  # flash-attn has updated with new key_states using cache_seqlens
+                    "value": v_cache,
+                    "position_offsets": position_offsets,
+                }
+            )
+
+        else:  # Training case
+            # Apply rotary embeddings to query/key states
+            # NOTE: The layout is different from models/llama.py which is [batch_size, num_heads, seq_length, d_qk]
+            # Here it is, [batch_size, seq_length, num_heads, d_qk]
+            # [2, batch_size, seq_length, num_heads, d_qk]
+            key_value_states = torch.cat([key_states.unsqueeze(0), value_states.unsqueeze(0)], dim=0)
+            # [batch_size, seq_length, 2, num_heads, d_qk]
+            key_value_states = key_value_states.permute(1, 2, 0, 3, 4).contiguous()
+            query_states, key_value_states = self.flash_rotary_embedding(query_states, kv=key_value_states)
+            # [batch_size, seq_length, num_heads, d_qk]
+            key_states, value_states = torch.split(key_value_states, 1, dim=2)
 
             q_sequence_mask = sequence_mask
             kv_sequence_mask = sequence_mask
@@ -461,11 +712,13 @@ class LlamaDecoderLayer(nn.Module):
         self.post_attention_layernorm = TritonRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.mlp = MLP(config=config, parallel_config=parallel_config, tp_pg=tp_pg)
 
-    def forward(
+        self.recompute_layer = parallel_config.recompute_layer
+
+    def _core_forward(
         self,
         hidden_states: Union[torch.Tensor, TensorPointer],
         sequence_mask: Union[torch.Tensor, TensorPointer],
-    ) -> Dict[str, Union[torch.Tensor, TensorPointer]]:
+    ) -> List[Union[torch.Tensor, TensorPointer]]:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
 
@@ -478,9 +731,29 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states=hidden_states)["hidden_states"]
         hidden_states = hidden_states + residual
 
+        return hidden_states, output["sequence_mask"]
+
+    def _checkpointed_forward(
+        self,
+        hidden_states: torch.Tensor,
+        sequence_mask: torch.Tensor,
+    ) -> List[torch.Tensor]:
+        return CheckpointFunction.apply(self._core_forward, True, hidden_states, sequence_mask)
+
+    def forward(
+        self,
+        hidden_states: Union[torch.Tensor, TensorPointer],
+        sequence_mask: Union[torch.Tensor, TensorPointer],
+    ) -> Dict[str, Union[torch.Tensor, TensorPointer]]:
+
+        if self.recompute_layer and not isinstance(hidden_states, TensorPointer):
+            hidden_states, sequence_mask = self._checkpointed_forward(hidden_states, sequence_mask)
+        else:
+            hidden_states, sequence_mask = self._core_forward(hidden_states, sequence_mask)
+
         return {
             "hidden_states": hidden_states,
-            "sequence_mask": output["sequence_mask"],
+            "sequence_mask": sequence_mask,
         }
 
 
@@ -546,7 +819,14 @@ class LlamaModel(nn.Module):
             module_input_keys={"input_ids", "input_mask"},
             module_output_keys={"input_embeds"},
         )
-
+        log_rank(f"Initialize RoPE Theta = {config.rope_theta}", logger=logger, level=logging.INFO, rank=0)
+        if config.rope_interleaved:
+            log_rank(
+                "The RoPE interleaved version differs from the Transformers implementation. It's better to set rope_interleaved=False if you need to convert the weights to Transformers",
+                logger=logger,
+                level=logging.INFO,
+                rank=0,
+            )
         self.decoder = nn.ModuleList(
             [
                 PipelineBlock(
@@ -585,6 +865,7 @@ class LlamaModel(nn.Module):
                 # TODO @thomasw21: refactor so that we store that default in a single place.
                 "mode": self.tp_mode,
                 "async_communication": tp_linear_async_communication,
+                "tp_recompute_allgather": parallel_config.tp_recompute_allgather,
             },
             module_input_keys={"x"},
             module_output_keys={"logits"},
