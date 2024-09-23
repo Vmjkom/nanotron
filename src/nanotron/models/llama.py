@@ -336,7 +336,7 @@ class CausalSelfAttention(nn.Module, AttachableStore):
         tp_pg: dist.ProcessGroup,
         layer_idx: int,
     ):
-        #from flash_attn.layers.rotary import RotaryEmbedding as FlashRotaryEmbedding
+        from flash_attn.layers.rotary import RotaryEmbedding as FlashRotaryEmbedding
 
         super().__init__()
         # Tensor parallel considerations: We split tensors along head dimension
