@@ -14,7 +14,6 @@ classifiers = [
     "Topic :: Software Development"
 ]
 dependencies = [
-    "torch>=1.13.1",
     "pyyaml",
     "numpy",
     "packaging",

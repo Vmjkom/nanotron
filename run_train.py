@@ -29,7 +29,7 @@ from nanotron.parallel.pipeline_parallel.utils import get_input_output_pp_ranks
 from nanotron.trainer import DistributedTrainer
 from nanotron.utils import main_rank_first
 from torch.utils.data import DataLoader
-
+from torch.distributed import barrier
 try:
     from huggingface_hub import __version__ as hf_hub_version
     from transformers import AutoTokenizer

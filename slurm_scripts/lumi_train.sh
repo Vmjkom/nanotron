@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH -J debug_nanotron_LLAMA2_7B_8N
+#SBATCH -J debug_nanotron_LLAMA2_7B_2N
 #SBATCH --cpus-per-task=7
-#SBATCH --nodes=8
+#SBATCH --nodes=2
 #SBATCH --ntasks-per-node=8
 #SBATCH --mem=480G
 #SBATCH --partition=dev-g
-#SBATCH --time=01:00:00
+#SBATCH --time=00:15:00
 #SBATCH --gpus-per-node=mi250:8
 #SBATCH --exclusive
 #SBATCH --account=project_462000558
@@ -29,7 +29,7 @@ export CONFIG="examples/config_llama.yaml"
 #More info https://docs.sylabs.io/guides/3.7/user-guide/environment_and_metadata.html#environment-overview
 export SINGULARITYENV_TOKENIZERS_PARALLELISM=false #Disable forking the FastTokenizer
 export SINGULARITYENV_TORCH_NCCL_ASYNC_ERROR_HANDLING=1
-export SINGULARITYENV_HF_HOME=/scratch/project_462000558/transformers_cache
+export SINGULARITYENV_HF_HOME=/scratch/project_462000353/transformers_cache
 export SINGULARITYENV_PYTHONWARNINGS=ignore #Decrease verbosity in logging. Pytorch warnings log on every rank
 export SINGULARITYENV_PYTHONUSERBASE="pythonuserbase" 
 export SINGULARITYENV_PYTHONPATH="$PYTHONPATH:src"
