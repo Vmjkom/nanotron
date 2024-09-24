@@ -31,23 +31,80 @@ Nanotron is a library for pretraining transformer models. It provides a simple a
 - **Simplicity**: Nanotron is designed to be easy to use. It provides a simple and flexible API to pretrain models on custom datasets.
 - **Performance**: Optimized for speed and scalability, Nanotron uses the latest techniques to train models faster and more efficiently.
 
-## Installation
-
+# LUMI
+## Setup
+You can do the following on a login node, as all of the gpu related installations are arleady in the module/contaer we use
 ```bash
-# Requirements: Python>=3.10
-git clone https://github.com/huggingface/nanotron
-cd nanotron
+module purge
+
+# Get access to the csc provided modules
+module use /appl/local/csc/modulefiles #Consider adding this to your .bashrc or .profile
+module load pytorch/2.4 #As of 24.9.2024 the latest is this. The previous versions propably wont work
+
+#Right now we use a naughty virtual enviroment, but expect this to change to a fully containerized enviroment
+
+python3 -m venv .venv --system-site-packages 
+source .venv/bin/activate
 pip install --upgrade pip
-pip install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu121
-pip install -e .
-
-# Install dependencies if you want to use the example scripts
-pip install datasets transformers
-pip install triton "flash-attn>=2.5.0" --no-build-isolation
+pip install -e .[nanosets]
 ```
-> [!NOTE]
-> If you get `undefined symbol: ncclCommRegister` error you should install torch 2.1.2 instead: `pip install torch==2.1.2 --index-url https://download.pytorch.org/whl/cu121`
+## Data
+If your dataset is available in huggingface format you set it in your .yaml config file like so:
+```yaml
+data_stages:
+- data:
+    dataset:
+      dataset_overwrite_cache: false
+      dataset_processing_num_proc_per_process: 7
+      hf_dataset_config_name: null
+      hf_dataset_or_datasets:
+          roneneldan/TinyStories: 0.5
+      hf_dataset_splits: train
+      text_column_name: text
+    num_loading_workers: 0
+    seed: 42
+  name: Stable Training Stage
+  start_training_step: 1
 
+```
+### Preprocess
+Larger datasets can be preprocessed with [`/tools/preprocess_data.py`](/tools/preprocess_data.py). This is a script that read in and process a large dataset in various ways, in a parallel fashion. This is done with the [`datatrove library`](https://github.com/huggingface/datatrove) 
+
+These preprocessed datasets are called "nanosets" and are configured in the yaml file a little differently:
+```yaml
+data_stages:
+  - data:
+      dataset:
+        dataset_folder: /scratch/project_462000353/data/nanosets/fineweb-edu/350BT
+      num_loading_workers: 7
+      seed: 42
+    name: Stable Training Stage
+    start_training_step: 1
+
+```
+More info for these is in [`/tools/nanoset.md`](/tools/nanoset.md).
+
+See all of the dataset related configuration parameters in [`config.py`](/src/nanotron/config/config.py)
+
+## Fineweb ablations
+If your wish is to do pretraining for a fineweb-like ablation study, you can follow these steps:
+Modify the [`llama_2B.yaml`](/configs/llama_2B.yaml)config file to point to your own datasets, directories for checkpoints etc.
+The model parameters should be left untouched if you want to replicate the 1.82B llama model huggingface used.
+Modify [`slurm_script`](/slurm_scripts/train.sh) and add your config file ``export CONFIG=$DIR/configs/llama_2B.yaml``
+```bash
+sbatch /slurm_scripts/train.sh
+
+#Or for quick debugging launch an interactive session with salloc
+#PARAMS: 2 nodes, 30 minutes run time, job name
+./slurm_scripts/interactive.sh 2 00:30:00 debug-nanotron
+
+#And then to launch after your resources have been allocated
+./slurm_scripts/train.sh
+```
+## TODO
+- [ ] Implement [`lighteval`](/src/nanotron/config/lighteval_config.py) into the pretraining
+- [ ] Others?
+# End of LUMI spesific README
 > [!TIP]
 > We log to wandb automatically if it's installed. For that you can use `pip install wandb`. If you don't want to use wandb, you can run `wandb disabled`.
 

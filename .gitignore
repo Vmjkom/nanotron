@@ -168,5 +168,9 @@ logs/*.out
 hostfiles/*
 pythonuserbase
 core
-tools/data_preprocess-8035567.out
-tools/data_preprocess-8035567.err
+
+#Logs
+*.out
+*.err
+slurm_scripts/debug.sh
+configs/debug.yaml
